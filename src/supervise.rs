@@ -3,7 +3,8 @@
 /// library called `tinytemplate` and of course serde.
 use std::path::{Path, PathBuf};
 
-use anyhow::anyhow;
+use crate::errors;
+use error_stack::*;
 use regex::Regex;
 use serde::Serialize;
 use tinytemplate::TinyTemplate;
@@ -173,18 +174,18 @@ impl Properties {
         launcher: Launcher,
         config: Option<&'_ Path>,
         config_type: ConfigFormat,
-    ) -> Result<Self, anyhow::Error> {
+    ) -> Result<Self, errors::Error> {
         let distro = if cfg!(target_os = "linux") {
             if let Ok(release) = std::fs::read_to_string(OS_RELEASE_FILE) {
-                let id_regex = Regex::new(r#"\nID=(.+)\n"#)?;
+                let id_regex = Regex::new(r#"\nID=(.+)\n"#).change_context(errors::Error)?;
                 if let Some(caps) = id_regex.captures(&release) {
                     caps.get(1)
                         .map(|distro| distro.clone().as_str().to_string())
                 } else {
-                    return Err(anyhow!("Could not determine Linux distribution; you'll need to configure supervision manually. Sorry!"));
+                    return Err(errors::Error).attach_printable("Could not determine Linux distribution; you'll need to configure supervision manually. Sorry!");
                 }
             } else {
-                return Err(anyhow!("Could not determine Linux distribution; you'll need to configure supervision manually. Sorry!"));
+                return Err(errors::Error).attach_printable("Could not determine Linux distribution; you'll need to configure supervision manually. Sorry!");
             }
         } else {
             None
@@ -192,7 +193,11 @@ impl Properties {
 
         Ok(Self {
             distro,
-            binpath: String::from(std::env::current_exe()?.to_string_lossy()),
+            binpath: String::from(
+                std::env::current_exe()
+                    .change_context(errors::Error)?
+                    .to_string_lossy(),
+            ),
             config_type: config_type.clone(),
             config_type_supplied: config_type != ConfigFormat::YAML,
             config: config.map(|config| config.to_owned()),
@@ -200,11 +205,14 @@ impl Properties {
         })
     }
 
-    pub fn validate(&mut self) -> Result<(), anyhow::Error> {
+    pub fn validate(&mut self) -> Result<(), errors::Error> {
         self.config = match self.config.clone() {
             Some(config) => match config.canonicalize() {
                 Ok(res) => Some(res),
-                Err(e) => return Err(anyhow!("Could not find token file: {}", e)),
+                Err(e) => {
+                    return Err(errors::Error)
+                        .attach_printable(format!("Could not find token file: {}", e))
+                }
             },
             None => None,
         };
@@ -214,12 +222,13 @@ impl Properties {
             .token
             .clone()
             .expect("Could not find token file: {}")
-            .canonicalize()?;
+            .canonicalize()
+            .change_context(errors::Error)?;
 
         let tstat = match std::fs::metadata(token.clone()) {
             Ok(ts) => ts,
             Err(e) => {
-                return Err(anyhow!(
+                return Err(errors::Error).attach_printable(format!(
                     "Could not stat token file {}: {}",
                     token.display(),
                     e
@@ -228,7 +237,8 @@ impl Properties {
         };
 
         if !tstat.is_file() {
-            return Err(anyhow!("Token file {} is not a file", token.display()));
+            return Err(errors::Error)
+                .attach_printable(format!("Token file {} is not a file", token.display()));
         }
 
         if self
@@ -239,14 +249,14 @@ impl Properties {
             .len()
             != 16
         {
-            return Err(anyhow!("Network ID must be 16 characters"));
+            return Err(errors::Error).attach_printable("Network ID must be 16 characters");
         }
 
         if let Some(hosts_file) = self.launcher.hosts.clone() {
             let hstat = match std::fs::metadata(hosts_file.clone()) {
                 Ok(hs) => hs,
                 Err(e) => {
-                    return Err(anyhow!(
+                    return Err(errors::Error).attach_printable(format!(
                         "Could not stat hosts file {}: {}",
                         hosts_file.display(),
                         e
@@ -255,19 +265,23 @@ impl Properties {
             };
 
             if !hstat.is_file() {
-                return Err(anyhow!("Hosts file {} is not a file", hosts_file.display()));
+                return Err(errors::Error).attach_printable(format!(
+                    "Hosts file {} is not a file",
+                    hosts_file.display()
+                ));
             }
 
-            self.launcher.hosts = Some(hosts_file.canonicalize()?);
+            self.launcher.hosts = Some(hosts_file.canonicalize().change_context(errors::Error)?);
         }
 
         if let Some(domain) = self.launcher.domain.clone() {
             if domain.trim().is_empty() {
-                return Err(anyhow!("Domain name cannot be empty"));
+                return Err(errors::Error).attach_printable("Domain name cannot be empty");
             }
 
             if let Err(e) = Name::parse(&domain, None) {
-                return Err(anyhow!("Domain name is invalid: {}", e));
+                return Err(errors::Error)
+                    .attach_printable(format!("Domain name is invalid: {}", e));
             }
         }
 
@@ -275,7 +289,7 @@ impl Properties {
             let hstat = match std::fs::metadata(authtoken.clone()) {
                 Ok(hs) => hs,
                 Err(e) => {
-                    return Err(anyhow!(
+                    return Err(errors::Error).attach_printable(format!(
                         "Could not stat authtoken file {}: {}",
                         authtoken.display(),
                         e
@@ -284,26 +298,27 @@ impl Properties {
             };
 
             if !hstat.is_file() {
-                return Err(anyhow!(
+                return Err(errors::Error).attach_printable(format!(
                     "launcher.secret file {} is not a file",
                     authtoken.display()
                 ));
             }
 
-            self.launcher.secret = Some(authtoken.canonicalize()?);
+            self.launcher.secret = Some(authtoken.canonicalize().change_context(errors::Error)?);
         }
 
         Ok(())
     }
 
-    pub fn supervise_template(&self) -> Result<String, anyhow::Error> {
+    pub fn supervise_template(&self) -> Result<String, errors::Error> {
         let template = self.get_service_template();
 
         let mut t = TinyTemplate::new();
-        t.add_template("supervise", template)?;
+        t.add_template("supervise", template)
+            .change_context(errors::Error)?;
         match t.render("supervise", self) {
             Ok(x) => Ok(x),
-            Err(e) => Err(anyhow!(e)),
+            Err(e) => Err(errors::Error).attach_printable(e),
         }
     }
 
@@ -362,20 +377,20 @@ impl Properties {
         PathBuf::from(dir).join(self.service_name())
     }
 
-    pub fn install_supervisor(&mut self) -> Result<(), anyhow::Error> {
-        self.validate()?;
+    pub fn install_supervisor(&mut self) -> Result<(), errors::Error> {
+        self.validate().change_context(errors::Error)?;
 
         if cfg!(target_os = "linux") {
             #[cfg(target_os = "linux")]
             let executable = self.distro.as_deref() == Some("alpine");
 
-            let template = self.supervise_template()?;
+            let template = self.supervise_template().change_context(errors::Error)?;
             let service_path = self.service_path();
 
             match std::fs::write(service_path.clone(), template) {
                 Ok(_) => {}
                 Err(e) => {
-                    return Err(anyhow!(
+                    return Err(errors::Error).attach_printable(format!(
                         "Could not write the template {}; are you root? ({})",
                         service_path
                             .to_str()
@@ -387,9 +402,12 @@ impl Properties {
 
             #[cfg(target_os = "linux")]
             if executable {
-                let mut perms = std::fs::metadata(service_path.clone())?.permissions();
+                let mut perms = std::fs::metadata(service_path.clone())
+                    .change_context(errors::Error)?
+                    .permissions();
                 perms.set_mode(0o755);
-                std::fs::set_permissions(service_path.clone(), perms)?;
+                std::fs::set_permissions(service_path.clone(), perms)
+                    .change_context(errors::Error)?;
             }
 
             let network = self
@@ -416,13 +434,13 @@ impl Properties {
                 help,
             );
         } else if cfg!(target_os = "macos") {
-            let template = self.supervise_template()?;
+            let template = self.supervise_template().change_context(errors::Error)?;
             let service_path = self.service_path();
 
             match std::fs::write(&service_path, template) {
                 Ok(_) => {}
                 Err(e) => {
-                    return Err(anyhow!(
+                    return Err(errors::Error).attach_printable(format!(
                         "Could not write the template {}; are you root? ({})",
                         service_path
                             .to_str()
@@ -438,17 +456,18 @@ impl Properties {
                 service_path.to_str().expect("Could not coerce service path to string")
             );
         } else {
-            return Err(anyhow!("Your platform is not supported for this command"));
+            return Err(errors::Error)
+                .attach_printable("Your platform is not supported for this command");
         }
         Ok(())
     }
 
-    pub fn uninstall_supervisor(&self) -> Result<(), anyhow::Error> {
+    pub fn uninstall_supervisor(&self) -> Result<(), errors::Error> {
         if cfg!(target_os = "linux") {
             match std::fs::remove_file(self.service_path()) {
                 Ok(_) => {}
                 Err(e) => {
-                    return Err(anyhow!(
+                    return Err(errors::Error).attach_printable(format!(
                         "Could not uninstall supervisor unit file ({}): {}",
                         self.service_path()
                             .to_str()
@@ -465,7 +484,7 @@ impl Properties {
             match std::fs::remove_file(self.service_path()) {
                 Ok(_) => {}
                 Err(e) => {
-                    return Err(anyhow!(
+                    return Err(errors::Error).attach_printable(format!(
                         "Could not uninstall supervisor unit file ({}): {}",
                         self.service_path()
                             .to_str()
@@ -481,7 +500,8 @@ impl Properties {
                 self.service_name().replace(".plist", "")
             );
         } else {
-            return Err(anyhow!("Your platform is not supported for this command"));
+            return Err(errors::Error)
+                .attach_printable("Your platform is not supported for this command");
         }
         Ok(())
     }

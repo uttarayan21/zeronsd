@@ -9,10 +9,12 @@ use std::{
 
 use crate::{
     addresses::Calculator,
+    errors,
     hosts::{parse_hosts, HostsFile},
     traits::{ToHostname, ToPointerSOA, ToWildcard},
     utils::parse_member_name,
 };
+use error_stack::{Result, ResultExt};
 
 use async_trait::async_trait;
 use ipnetwork::IpNetwork;
@@ -57,10 +59,11 @@ pub async fn find_members(mut zt: ZTAuthority) {
     }
 }
 
-pub async fn init_catalog(zt: ZTAuthority) -> Result<Catalog, anyhow::Error> {
+pub async fn init_catalog(zt: ZTAuthority) -> Result<Catalog, errors::Error> {
     let mut catalog = Catalog::default();
 
-    let resolv = trust_dns_resolver::system_conf::read_system_conf()?;
+    let resolv =
+        trust_dns_resolver::system_conf::read_system_conf().change_context(errors::Error)?;
     let mut nsconfig = NameServerConfigGroup::new();
 
     for server in resolv.0.name_servers() {
@@ -88,7 +91,10 @@ pub async fn init_catalog(zt: ZTAuthority) -> Result<Catalog, anyhow::Error> {
     );
 
     for (network, authority) in zt.reverse_authority_map {
-        catalog.upsert(network.to_ptr_soa_name()?, authority.box_clone())
+        catalog.upsert(
+            network.to_ptr_soa_name().change_context(errors::Error)?,
+            authority.box_clone(),
+        )
     }
 
     Ok(catalog)
@@ -107,11 +113,14 @@ pub struct ZTAuthority {
 }
 
 impl ZTAuthority {
-    pub async fn configure_hosts(&mut self) -> Result<(), anyhow::Error> {
-        self.hosts = Some(Box::new(parse_hosts(
-            self.hosts_file.clone(),
-            self.forward_authority.domain_name.clone().into(),
-        )?));
+    pub async fn configure_hosts(&mut self) -> Result<(), errors::Error> {
+        self.hosts = Some(Box::new(
+            parse_hosts(
+                self.hosts_file.clone(),
+                self.forward_authority.domain_name.clone().into(),
+            )
+            .change_context(errors::Error)?,
+        ));
 
         for (ip, hostnames) in self.hosts.clone().unwrap().iter() {
             for hostname in hostnames {
@@ -128,7 +137,7 @@ impl ZTAuthority {
         &self,
         network: central_api::types::Network,
         members: Vec<central_api::types::Member>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), errors::Error> {
         let mut forward_records = vec![self.forward_authority.domain_name.clone()];
         let mut reverse_records = HashMap::new();
 
@@ -139,7 +148,10 @@ impl ZTAuthority {
             });
 
         if let Some(hosts) = self.hosts.clone() {
-            self.forward_authority.prune_hosts(hosts.clone()).await?;
+            self.forward_authority
+                .prune_hosts(hosts.clone())
+                .await
+                .change_context(errors::Error)?;
             forward_records.append(&mut hosts.values().flatten().map(|v| v.into()).collect());
         }
 
@@ -148,17 +160,17 @@ impl ZTAuthority {
         let v6assign = network.config.clone().unwrap().v6_assign_mode;
         if let Some(v6assign) = v6assign {
             if v6assign._6plane.unwrap_or(false) {
-                let s = network.clone().sixplane()?;
+                let s = network.clone().sixplane().change_context(errors::Error)?;
                 sixplane = Some(s);
             }
 
             if v6assign.rfc4193.unwrap_or(false) {
-                let s = network.clone().rfc4193()?;
+                let s = network.clone().rfc4193().change_context(errors::Error)?;
                 rfc4193 = Some(s);
                 reverse_records
                     .get_mut(&s)
                     .unwrap()
-                    .push(s.to_ptr_soa_name()?)
+                    .push(s.to_ptr_soa_name().change_context(errors::Error)?)
             }
         }
 
@@ -169,11 +181,13 @@ impl ZTAuthority {
                 rfc4193,
                 self.forward_authority.domain_name.clone().into(),
                 self.wildcard,
-            )?;
+            )
+            .change_context(errors::Error)?;
 
             self.forward_authority
                 .insert_member(&mut forward_records, record.clone())
-                .await?;
+                .await
+                .change_context(errors::Error)?;
 
             if let Some(ips) = member.clone().config.and_then(|c| {
                 c.ip_assignments.map(|v| {
@@ -190,7 +204,8 @@ impl ZTAuthority {
                                     reverse_records.get_mut(&network).unwrap(),
                                     record.clone(),
                                 )
-                                .await?;
+                                .await
+                                .change_context(errors::Error)?;
                         }
                     }
                 }
@@ -199,10 +214,16 @@ impl ZTAuthority {
             if let Some(ptr) = rfc4193 {
                 if let Some(authority) = self.reverse_authority_map.get(&ptr) {
                     if let Some(records) = reverse_records.get_mut(&ptr) {
-                        let ptr = member.rfc4193()?.ip().into_name()?;
+                        let ptr = member
+                            .rfc4193()
+                            .change_context(errors::Error)?
+                            .ip()
+                            .into_name()
+                            .change_context(errors::Error)?;
                         authority
                             .configure_ptr(ptr.clone(), record.ptr_name.clone())
-                            .await?;
+                            .await
+                            .change_context(errors::Error)?;
                         records.push(ptr.into());
                     }
                 }
@@ -211,12 +232,14 @@ impl ZTAuthority {
 
         self.forward_authority
             .prune_records(forward_records.clone())
-            .await?;
+            .await
+            .change_context(errors::Error)?;
 
         for (network, authority) in self.reverse_authority_map.clone() {
             authority
                 .prune_records(reverse_records.get(&network).unwrap().clone())
-                .await?;
+                .await
+                .change_context(errors::Error)?;
         }
 
         Ok(())
@@ -224,12 +247,18 @@ impl ZTAuthority {
 
     pub async fn get_members(
         &self,
-    ) -> Result<(central_api::types::Network, Vec<central_api::types::Member>), anyhow::Error> {
+    ) -> Result<(central_api::types::Network, Vec<central_api::types::Member>), errors::Error> {
         let client = self.client.clone();
         let network_id = self.network_id.clone();
 
-        let members = client.get_network_member_list(&network_id).await?;
-        let network = client.get_network_by_id(&network_id).await?;
+        let members = client
+            .get_network_member_list(&network_id)
+            .await
+            .change_context(errors::Error)?;
+        let network = client
+            .get_network_by_id(&network_id)
+            .await
+            .change_context(errors::Error)?;
 
         Ok((network.to_owned(), members.to_owned()))
     }
@@ -245,10 +274,12 @@ impl RecordAuthority {
     pub async fn new(
         domain_name: LowerName,
         member_name: LowerName,
-    ) -> Result<Self, anyhow::Error> {
+    ) -> Result<Self, errors::Error> {
         Ok(Self {
             authority: Arc::new(
-                Self::configure_authority(domain_name.clone().into(), member_name.into()).await?,
+                Self::configure_authority(domain_name.clone().into(), member_name.into())
+                    .await
+                    .change_context(errors::Error)?,
             ),
             domain_name,
         })
@@ -257,13 +288,16 @@ impl RecordAuthority {
     async fn configure_authority(
         domain_name: Name,
         member_name: Name,
-    ) -> Result<InMemoryAuthority, anyhow::Error> {
+    ) -> Result<InMemoryAuthority, errors::Error> {
         let mut map = BTreeMap::new();
         let mut soa = Record::with(domain_name.clone(), RecordType::SOA, 30);
 
         soa.set_data(Some(RData::SOA(SOA::new(
             domain_name.clone(),
-            Name::from_str("administrator")?.append_domain(&domain_name)?,
+            Name::from_str("administrator")
+                .change_context(errors::Error)?
+                .append_domain(&domain_name)
+                .change_context(errors::Error)?,
             1,
             30,
             0,
@@ -309,7 +343,7 @@ impl RecordAuthority {
         }
     }
 
-    async fn prune_hosts(&self, hosts: Box<HostsFile>) -> Result<(), anyhow::Error> {
+    async fn prune_hosts(&self, hosts: Box<HostsFile>) -> Result<(), errors::Error> {
         let serial = self.authority.serial().await;
         let mut rr = self.authority.records_mut().await;
 
@@ -363,7 +397,7 @@ impl RecordAuthority {
                         new_rset.add_rdata(rdata);
                     }
 
-                    tracing::warn!("Replacing host record for {} with {:?}", key, ips);
+                    tracing::warn!("Replacing host record for {} with {:#?}", key, ips);
                     rr.remove(&rrkey);
                     rr.insert(rrkey.clone(), Arc::new(new_rset));
                 }
@@ -373,13 +407,17 @@ impl RecordAuthority {
         Ok(())
     }
 
-    async fn prune_records(&self, written: Vec<LowerName>) -> Result<(), anyhow::Error> {
+    async fn prune_records(&self, written: Vec<LowerName>) -> Result<(), errors::Error> {
         let mut rrkey_list = Vec::new();
 
         let mut rr = self.authority.records_mut().await;
 
         for (rrkey, rs) in rr.clone() {
-            let key = &rrkey.name().into_name()?.into();
+            let key = &rrkey
+                .name()
+                .into_name()
+                .change_context(errors::Error)?
+                .into();
             if !written.contains(key) && rs.record_type() != RecordType::SOA {
                 rrkey_list.push(rrkey);
             }
@@ -441,7 +479,7 @@ impl RecordAuthority {
         &self,
         records: &mut Vec<LowerName>,
         record: ZTRecord,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), errors::Error> {
         self.match_or_insert(record.fqdn.clone(), &record.ips).await;
         records.push(record.fqdn.clone().into());
 
@@ -470,18 +508,19 @@ impl RecordAuthority {
         &self,
         records: &mut Vec<LowerName>,
         record: ZTRecord,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), errors::Error> {
         for ip in record.ips.clone() {
-            let ip = ip.into_name()?;
+            let ip = ip.into_name().change_context(errors::Error)?;
             self.configure_ptr(ip.clone(), record.ptr_name.clone())
-                .await?;
+                .await
+                .change_context(errors::Error)?;
             records.push(ip.into());
         }
 
         Ok(())
     }
 
-    async fn configure_ptr(&self, ptr: Name, fqdn: Name) -> Result<(), anyhow::Error> {
+    async fn configure_ptr(&self, ptr: Name, fqdn: Name) -> Result<(), errors::Error> {
         let records = self.authority.records().await.clone();
 
         match records.get(&RrKey::new(ptr.clone().into(), RecordType::PTR)) {
@@ -550,7 +589,7 @@ impl AuthorityObject for RecordAuthority {
         name: &trust_dns_server::client::rr::LowerName,
         rtype: RecordType,
         lookup_options: trust_dns_server::authority::LookupOptions,
-    ) -> Result<
+    ) -> core::result::Result<
         Box<dyn trust_dns_server::authority::LookupObject>,
         trust_dns_server::authority::LookupError,
     > {
@@ -561,7 +600,7 @@ impl AuthorityObject for RecordAuthority {
         &self,
         request_info: trust_dns_server::server::RequestInfo<'_>,
         lookup_options: trust_dns_server::authority::LookupOptions,
-    ) -> Result<
+    ) -> core::result::Result<
         Box<dyn trust_dns_server::authority::LookupObject>,
         trust_dns_server::authority::LookupError,
     > {
@@ -572,7 +611,7 @@ impl AuthorityObject for RecordAuthority {
         &self,
         name: &trust_dns_server::client::rr::LowerName,
         lookup_options: trust_dns_server::authority::LookupOptions,
-    ) -> Result<
+    ) -> core::result::Result<
         Box<dyn trust_dns_server::authority::LookupObject>,
         trust_dns_server::authority::LookupError,
     > {
@@ -596,7 +635,7 @@ impl ZTRecord {
         rfc4193: Option<IpNetwork>,
         domain_name: Name,
         wildcard: bool,
-    ) -> Result<Self, anyhow::Error> {
+    ) -> Result<Self, errors::Error> {
         let member_name = format!(
             "zt-{}",
             member
@@ -605,7 +644,9 @@ impl ZTRecord {
                 .expect("Node ID for member does not exist")
         );
 
-        let fqdn = member_name.to_fqdn(domain_name.clone())?;
+        let fqdn = member_name
+            .to_fqdn(domain_name.clone())
+            .change_context(errors::Error)?;
 
         // this is default the zt-<member id> but can switch to a named name if
         // tweaked in central. see below.
@@ -629,11 +670,17 @@ impl ZTRecord {
             });
 
         if sixplane.is_some() {
-            ips.push(member.clone().sixplane()?.ip());
+            ips.push(
+                member
+                    .clone()
+                    .sixplane()
+                    .change_context(errors::Error)?
+                    .ip(),
+            );
         }
 
         if rfc4193.is_some() {
-            ips.push(member.clone().rfc4193()?.ip());
+            ips.push(member.clone().rfc4193().change_context(errors::Error)?.ip());
         }
 
         Ok(Self {

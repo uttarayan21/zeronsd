@@ -1,3 +1,4 @@
+use crate::errors;
 use std::{
     collections::{hash_map::Entry, HashMap},
     path::PathBuf,
@@ -5,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::anyhow;
+use error_stack::{Result, ResultExt};
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -44,16 +45,15 @@ pub enum ConfigFormat {
 }
 
 impl FromStr for ConfigFormat {
-    type Err = anyhow::Error;
+    type Err = errors::ErrorReport;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> core::result::Result<Self, Self::Err> {
         match s {
             "json" | "JSON" => Ok(ConfigFormat::JSON),
             "yaml" | "YAML" => Ok(ConfigFormat::YAML),
             "toml" | "TOML" => Ok(ConfigFormat::TOML),
-            _ => Err(anyhow!(
-                "invalid format: allowed values: [json, yaml, toml]"
-            )),
+            _ => Err(errors::Error)
+                .attach_printable("invalid format: allowed values: [json, yaml, toml]"),
         }
     }
 }
@@ -77,26 +77,26 @@ impl Default for Launcher {
 }
 
 impl Launcher {
-    pub fn new_from_config(filename: &str, format: ConfigFormat) -> Result<Self, anyhow::Error> {
-        let res = std::fs::read_to_string(filename)?;
+    pub fn new_from_config(filename: &str, format: ConfigFormat) -> Result<Self, errors::Error> {
+        let res = std::fs::read_to_string(filename).change_context(errors::Error)?;
         Self::parse_format(&res, format)
     }
 
-    pub fn parse_format(s: &str, format: ConfigFormat) -> Result<Self, anyhow::Error> {
+    pub fn parse_format(s: &str, format: ConfigFormat) -> Result<Self, errors::Error> {
         Ok(match format {
-            ConfigFormat::JSON => serde_json::from_str(s)?,
-            ConfigFormat::YAML => serde_yml::from_str(s)?,
-            ConfigFormat::TOML => toml::from_str(s)?,
+            ConfigFormat::JSON => serde_json::from_str(s).change_context(errors::Error)?,
+            ConfigFormat::YAML => serde_yml::from_str(s).change_context(errors::Error)?,
+            ConfigFormat::TOML => toml::from_str(s).change_context(errors::Error)?,
         })
     }
 
-    pub fn parse(s: &str, network_id: String, format: ConfigFormat) -> Result<Self, anyhow::Error> {
-        let mut l: Launcher = Self::parse_format(s, format)?;
+    pub fn parse(s: &str, network_id: String, format: ConfigFormat) -> Result<Self, errors::Error> {
+        let mut l: Launcher = Self::parse_format(s, format).change_context(errors::Error)?;
         l.network_id = Some(network_id);
         Ok(l)
     }
 
-    pub async fn start(&self) -> Result<ZTAuthority, anyhow::Error> {
+    pub async fn start(&self) -> Result<ZTAuthority, errors::Error> {
         crate::utils::init_logger(
             self.log_level
                 .clone()
@@ -105,12 +105,15 @@ impl Launcher {
         );
 
         if self.network_id.is_none() {
-            return Err(anyhow!("network ID is invalid; cannot continue"));
+            return Err(errors::Error).attach_printable("network ID is invalid; cannot continue");
         }
 
-        let domain_name = domain_or_default(self.domain.as_deref())?;
+        let domain_name =
+            domain_or_default(self.domain.as_deref()).change_context(errors::Error)?;
         let authtoken = authtoken_path(self.secret.as_deref());
-        let client = central_client(central_token(self.token.as_deref())?)?;
+        let client =
+            central_client(central_token(self.token.as_deref()).change_context(errors::Error)?)
+                .change_context(errors::Error)?;
 
         info!("Welcome to ZeroNS!");
         let ips = get_listen_ips(
@@ -120,7 +123,8 @@ impl Launcher {
                 .clone()
                 .unwrap_or(ZEROTIER_LOCAL_URL.to_string()),
         )
-        .await?;
+        .await
+        .change_context(errors::Error)?;
 
         // more or less the setup for the "main loop"
         if !ips.is_empty() {
@@ -132,7 +136,8 @@ impl Launcher {
                 client.clone(),
                 self.network_id.clone().unwrap(),
             )
-            .await?;
+            .await
+            .change_context(errors::Error)?;
 
             let mut listen_ips = Vec::new();
             let mut ipmap = HashMap::new();
@@ -141,14 +146,17 @@ impl Launcher {
             for cidr in ips.clone() {
                 let listen_ip = parse_ip_from_cidr(cidr.clone());
                 listen_ips.push(listen_ip);
-                let cidr = IpNetwork::from_str(&cidr.clone())?;
+                let cidr = IpNetwork::from_str(&cidr.clone()).change_context(errors::Error)?;
                 ipmap.entry(listen_ip).or_insert_with(|| cidr.network());
 
                 if let Entry::Vacant(e) = authority_map.entry(cidr) {
-                    tracing::debug!("{}", cidr.to_ptr_soa_name()?);
-                    let ptr_authority =
-                        RecordAuthority::new(cidr.to_ptr_soa_name()?, cidr.to_ptr_soa_name()?)
-                            .await?;
+                    tracing::debug!("{}", cidr.to_ptr_soa_name().change_context(errors::Error)?);
+                    let ptr_authority = RecordAuthority::new(
+                        cidr.to_ptr_soa_name().change_context(errors::Error)?,
+                        cidr.to_ptr_soa_name().change_context(errors::Error)?,
+                    )
+                    .await
+                    .change_context(errors::Error)?;
                     e.insert(ptr_authority);
                 }
             }
@@ -160,11 +168,13 @@ impl Launcher {
                     .clone()
                     .unwrap_or(ZEROTIER_LOCAL_URL.to_string()),
             )
-            .await?;
+            .await
+            .change_context(errors::Error)?;
 
             let network = client
                 .get_network_by_id(&self.network_id.clone().unwrap())
-                .await?;
+                .await
+                .change_context(errors::Error)?;
 
             if let Some(v6assign) = network.config.clone().unwrap().v6_assign_mode {
                 if v6assign._6plane.unwrap_or(false) {
@@ -174,17 +184,24 @@ impl Launcher {
                 if v6assign.rfc4193.unwrap_or(false) {
                     let cidr = network.clone().rfc4193().unwrap();
                     if let Entry::Vacant(e) = authority_map.entry(cidr) {
-                        tracing::debug!("{}", cidr.to_ptr_soa_name()?);
-                        let ptr_authority =
-                            RecordAuthority::new(cidr.to_ptr_soa_name()?, cidr.to_ptr_soa_name()?)
-                                .await?;
+                        tracing::debug!(
+                            "{}",
+                            cidr.to_ptr_soa_name().change_context(errors::Error)?
+                        );
+                        let ptr_authority = RecordAuthority::new(
+                            cidr.to_ptr_soa_name().change_context(errors::Error)?,
+                            cidr.to_ptr_soa_name().change_context(errors::Error)?,
+                        )
+                        .await
+                        .change_context(errors::Error)?;
                         e.insert(ptr_authority);
                     }
                 }
             }
 
-            let authority =
-                RecordAuthority::new(domain_name.clone().into(), member_name.clone()).await?;
+            let authority = RecordAuthority::new(domain_name.clone().into(), member_name.clone())
+                .await
+                .change_context(errors::Error)?;
 
             let ztauthority = ZTAuthority {
                 client,
@@ -204,19 +221,19 @@ impl Launcher {
                 info!("Your IP for this network: {}", ip);
 
                 let tls_cert = if let Some(tls_cert) = self.tls_cert.clone() {
-                    let pem = std::fs::read(tls_cert)?;
-                    Some(X509::from_pem(&pem)?)
+                    let pem = std::fs::read(tls_cert).change_context(errors::Error)?;
+                    Some(X509::from_pem(&pem).change_context(errors::Error)?)
                 } else {
                     None
                 };
 
                 let chain = if let Some(chain_cert) = self.chain_cert.clone() {
-                    let pem = std::fs::read(chain_cert)?;
-                    let chain = X509::stack_from_pem(&pem)?;
+                    let pem = std::fs::read(chain_cert).change_context(errors::Error)?;
+                    let chain = X509::stack_from_pem(&pem).change_context(errors::Error)?;
 
-                    let mut stack = Stack::new()?;
+                    let mut stack = Stack::new().change_context(errors::Error)?;
                     for cert in chain {
-                        stack.push(cert)?;
+                        stack.push(cert).change_context(errors::Error)?;
                     }
                     Some(stack)
                 } else {
@@ -224,8 +241,8 @@ impl Launcher {
                 };
 
                 let key = if let Some(key_path) = self.tls_key.clone() {
-                    let pem = std::fs::read(key_path)?;
-                    Some(PKey::private_key_from_pem(&pem)?)
+                    let pem = std::fs::read(key_path).change_context(errors::Error)?;
+                    Some(PKey::private_key_from_pem(&pem).change_context(errors::Error)?)
                 } else {
                     None
                 };
@@ -240,8 +257,8 @@ impl Launcher {
             return Ok(ztauthority);
         }
 
-        return Err(anyhow!(
-            "No listening IPs for your interface; assign one in ZeroTier Central."
-        ));
+        return Err(errors::Error).attach_printable(
+            "No listening IPs for your interface; assign one in ZeroTier Central.",
+        );
     }
 }

@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
-use anyhow::anyhow;
+use crate::errors;
+use error_stack::*;
 use ipnetwork::IpNetwork;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -48,33 +49,37 @@ lazy_static! {
 }
 
 pub trait ToHostname {
-    fn to_hostname(&self) -> Result<Name, anyhow::Error>;
-    fn to_fqdn(&self, domain: Name) -> Result<Name, anyhow::Error>;
+    fn to_hostname(&self) -> Result<Name, errors::Error>;
+    fn to_fqdn(&self, domain: Name) -> Result<Name, errors::Error>;
 }
 
 impl ToHostname for &str {
-    fn to_hostname(&self) -> Result<Name, anyhow::Error> {
+    fn to_hostname(&self) -> Result<Name, errors::Error> {
         self.to_string().to_hostname()
     }
 
-    fn to_fqdn(&self, domain: Name) -> Result<Name, anyhow::Error> {
-        Ok(self.to_hostname()?.append_domain(&domain).unwrap())
+    fn to_fqdn(&self, domain: Name) -> Result<Name, errors::Error> {
+        Ok(self
+            .to_hostname()
+            .change_context(errors::Error)?
+            .append_domain(&domain)
+            .unwrap())
     }
 }
 
 impl ToHostname for Member {
-    fn to_hostname(&self) -> Result<Name, anyhow::Error> {
+    fn to_hostname(&self) -> Result<Name, errors::Error> {
         ("zt-".to_string() + &self.node_id.clone().unwrap()).to_hostname()
     }
 
-    fn to_fqdn(&self, domain: Name) -> Result<Name, anyhow::Error> {
+    fn to_fqdn(&self, domain: Name) -> Result<Name, errors::Error> {
         ("zt-".to_string() + &self.node_id.clone().unwrap()).to_fqdn(domain)
     }
 }
 
 impl ToHostname for String {
     // to_hostname turns member names into trust-dns compatible dns names.
-    fn to_hostname(&self) -> Result<Name, anyhow::Error> {
+    fn to_hostname(&self) -> Result<Name, errors::Error> {
         let mut s = self.trim().to_string();
         for (regex, replacement) in TRANSLATION_TABLE.iter() {
             s = regex.replace_all(&s, *replacement).to_string();
@@ -83,18 +88,23 @@ impl ToHostname for String {
         let s = s.trim();
 
         if s == "." || s.ends_with('.') {
-            return Err(anyhow!("Record {} not entered into catalog: '.' and records that ends in '.' are disallowed", s));
+            return Err(errors::Error).attach_printable(format!("Record {} not entered into catalog: '.' and records that ends in '.' are disallowed", s));
         }
 
         if s.is_empty() {
-            return Err(anyhow!("translated hostname {} is an empty string", self));
+            return Err(errors::Error)
+                .attach_printable(format!("translated hostname {} is an empty string", self));
         }
 
-        Ok(s.trim().into_name()?)
+        Ok(s.trim().into_name().change_context(errors::Error)?)
     }
 
-    fn to_fqdn(&self, domain: Name) -> Result<Name, anyhow::Error> {
-        Ok(self.to_hostname()?.append_domain(&domain).unwrap())
+    fn to_fqdn(&self, domain: Name) -> Result<Name, errors::Error> {
+        Ok(self
+            .to_hostname()
+            .change_context(errors::Error)?
+            .append_domain(&domain)
+            .unwrap())
     }
 }
 

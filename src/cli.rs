@@ -1,8 +1,10 @@
 use crate::{
+    errors,
     init::{ConfigFormat, Launcher},
     supervise::Properties,
     utils::ZEROTIER_LOCAL_URL,
 };
+use error_stack::*;
 use std::{path::PathBuf, time::Duration};
 
 use clap::{Args, Parser, Subcommand};
@@ -119,12 +121,12 @@ pub struct UnsuperviseArgs {
     pub network_id: String,
 }
 
-pub async fn init() -> Result<(), anyhow::Error> {
+pub async fn init() -> Result<(), errors::Error> {
     let cli = Cli::parse();
 
     let result = match cli.command {
         Command::Start(args) => {
-            start(args).await?;
+            start(args).await.change_context(errors::Error)?;
 
             loop {
                 tokio::time::sleep(Duration::MAX).await
@@ -141,19 +143,19 @@ pub async fn init() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn start(args: StartArgs) -> Result<(), anyhow::Error> {
+async fn start(args: StartArgs) -> Result<(), errors::Error> {
     let launcher: Launcher = args.into();
 
-    launcher.start().await?;
+    launcher.start().await.change_context(errors::Error)?;
     Ok(())
 }
 
-fn unsupervise(args: UnsuperviseArgs) -> Result<(), anyhow::Error> {
+fn unsupervise(args: UnsuperviseArgs) -> Result<(), errors::Error> {
     crate::utils::init_logger(Some(tracing::Level::INFO));
     Properties::from(args).uninstall_supervisor()
 }
 
-fn supervise(args: StartArgs) -> Result<(), anyhow::Error> {
+fn supervise(args: StartArgs) -> Result<(), errors::Error> {
     crate::utils::init_logger(Some(tracing::Level::INFO));
     Properties::from(args).install_supervisor()
 }

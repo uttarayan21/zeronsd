@@ -5,9 +5,9 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use tracing::warn;
 use trust_dns_server::client::rr::{LowerName, Name};
 
-use anyhow::anyhow;
-
+use crate::errors;
 use crate::traits::ToHostname;
+use error_stack::*;
 
 use zerotier_api::{central_api, service_api};
 
@@ -58,11 +58,11 @@ pub fn init_logger(level: Option<tracing::Level>) {
 }
 
 // this provides the production configuration for talking to central through the openapi libraries.
-pub fn central_client(token: String) -> Result<central_api::Client, anyhow::Error> {
+pub fn central_client(token: String) -> Result<central_api::Client, errors::Error> {
     let mut headers = HeaderMap::new();
     headers.insert(
         "Authorization",
-        HeaderValue::from_str(&format!("bearer {}", token))?,
+        HeaderValue::from_str(&format!("bearer {}", token)).change_context(errors::Error)?,
     );
 
     Ok(central_api::Client::new_with_client(
@@ -71,7 +71,8 @@ pub fn central_client(token: String) -> Result<central_api::Client, anyhow::Erro
             .user_agent(version())
             .https_only(true)
             .default_headers(headers)
-            .build()?,
+            .build()
+            .change_context(errors::Error)?,
     ))
 }
 
@@ -83,7 +84,7 @@ pub fn parse_ip_from_cidr(ip_with_cidr: String) -> IpAddr {
 }
 
 // load and prepare the central API token
-pub fn central_token(arg: Option<&Path>) -> Result<String, anyhow::Error> {
+pub fn central_token(arg: Option<&Path>) -> Result<String, errors::Error> {
     if let Some(path) = arg {
         return Ok(std::fs::read_to_string(path)
             .expect("Could not load token file")
@@ -97,7 +98,7 @@ pub fn central_token(arg: Option<&Path>) -> Result<String, anyhow::Error> {
         }
     }
 
-    return Err(anyhow!("missing zerotier central token: set ZEROTIER_CENTRAL_TOKEN in environment, or pass a file containing it with -t"));
+    return Err(errors::Error).attach_printable("missing zerotier central token: set ZEROTIER_CENTRAL_TOKEN in environment, or pass a file containing it with -t");
 }
 
 // determine the path of the authtoken.secret
@@ -118,16 +119,17 @@ pub fn authtoken_path(arg: Option<&Path>) -> &Path {
 }
 
 // use the default tld if none is supplied.
-pub fn domain_or_default(tld: Option<&str>) -> Result<Name, anyhow::Error> {
+pub fn domain_or_default(tld: Option<&str>) -> Result<Name, errors::Error> {
     if let Some(tld) = tld {
         if !tld.is_empty() {
-            return Ok(Name::from_str(&format!("{}.", tld))?);
+            return Ok(Name::from_str(&format!("{}.", tld)).change_context(errors::Error)?);
         } else {
-            return Err(anyhow!("Domain name must not be empty if provided."));
+            return Err(errors::Error)
+                .attach_printable("Domain name must not be empty if provided.");
         }
     };
 
-    Ok(Name::from_str(DEFAULT_DOMAIN_NAME)?)
+    Ok(Name::from_str(DEFAULT_DOMAIN_NAME).change_context(errors::Error)?)
 }
 
 // parse_member_name ensures member names are DNS compliant
@@ -138,7 +140,7 @@ pub fn parse_member_name(name: Option<String>, domain_name: Name) -> Option<Name
             match name.to_fqdn(domain_name) {
                 Ok(record) => return Some(record),
                 Err(e) => {
-                    warn!("Record {} not entered into catalog: {:?}", name, e);
+                    warn!("Record {} not entered into catalog: {}", name, e);
                     return None;
                 }
             };
@@ -152,40 +154,51 @@ pub async fn get_member_name(
     authtoken_path: &Path,
     domain_name: Name,
     local_url: String,
-) -> Result<LowerName, anyhow::Error> {
-    let client = local_client_from_file(authtoken_path, local_url)?;
+) -> Result<LowerName, errors::Error> {
+    let client = local_client_from_file(authtoken_path, local_url).change_context(errors::Error)?;
 
-    let status = client.get_status().await?.into_inner();
+    let status = client
+        .get_status()
+        .await
+        .change_context(errors::Error)?
+        .into_inner();
     if let Some(address) = &status.address {
-        return Ok(("zt-".to_string() + address).to_fqdn(domain_name)?.into());
+        return Ok(("zt-".to_string() + address)
+            .to_fqdn(domain_name)
+            .change_context(errors::Error)?
+            .into());
     }
 
-    Err(anyhow!(
-        "No member found for this instance; is zerotier connected to this network?"
-    ))
+    Err(errors::Error).attach_printable(
+        "No member found for this instance; is zerotier connected to this network.change_context(errors::Error)?"
+    )
 }
 
 fn local_client_from_file(
     authtoken_path: &Path,
     local_url: String,
-) -> Result<service_api::Client, anyhow::Error> {
-    let authtoken = std::fs::read_to_string(authtoken_path)?;
+) -> Result<service_api::Client, errors::Error> {
+    let authtoken = std::fs::read_to_string(authtoken_path).change_context(errors::Error)?;
     local_client(authtoken, local_url)
 }
 
 pub fn local_client(
     authtoken: String,
     local_url: String,
-) -> Result<service_api::Client, anyhow::Error> {
+) -> Result<service_api::Client, errors::Error> {
     let mut headers = HeaderMap::new();
-    headers.insert("X-ZT1-Auth", HeaderValue::from_str(&authtoken)?);
+    headers.insert(
+        "X-ZT1-Auth",
+        HeaderValue::from_str(&authtoken).change_context(errors::Error)?,
+    );
 
     Ok(service_api::Client::new_with_client(
         &local_url,
         reqwest::Client::builder()
             .user_agent(version())
             .default_headers(headers)
-            .build()?,
+            .build()
+            .change_context(errors::Error)?,
     ))
 }
 
@@ -195,21 +208,22 @@ pub async fn get_listen_ips(
     authtoken_path: &Path,
     network_id: &str,
     local_url: String,
-) -> Result<Vec<String>, anyhow::Error> {
-    let client = local_client_from_file(authtoken_path, local_url)?;
+) -> Result<Vec<String>, errors::Error> {
+    let client = local_client_from_file(authtoken_path, local_url).change_context(errors::Error)?;
 
     match client.get_network(network_id).await {
-        Err(error) => Err(anyhow!(
-            "Error: {}. Are you joined to {}?",
-            error,
-            network_id
-        )),
+        Err(error) => Err(errors::Error).attach_printable_lazy(|| {
+            format!(
+                "Error: {}. Are you joined to {}.change_context(errors::Error)?",
+                error, network_id
+            )
+        }),
         Ok(listen) => {
             let assigned = listen.into_inner().assigned_addresses.to_owned();
             if !assigned.is_empty() {
                 Ok(assigned)
             } else {
-                Err(anyhow!("No listen IPs available on this network"))
+                Err(errors::Error).attach_printable("No listen IPs available on this network")
             }
         }
     }
@@ -221,8 +235,11 @@ pub async fn update_central_dns(
     ips: Vec<String>,
     client: central_api::Client,
     network: String,
-) -> Result<(), anyhow::Error> {
-    let mut zt_network = client.get_network_by_id(&network).await?;
+) -> Result<(), errors::Error> {
+    let mut zt_network = client
+        .get_network_by_id(&network)
+        .await
+        .change_context(errors::Error)?;
 
     let mut domain_name = domain_name;
     domain_name.set_fqdn(false);
@@ -235,7 +252,10 @@ pub async fn update_central_dns(
     if let Some(mut zt_network_config) = zt_network.config.to_owned() {
         zt_network_config.dns = dns;
         zt_network.config = Some(zt_network_config);
-        client.update_network(&network, &zt_network).await?;
+        client
+            .update_network(&network, &zt_network)
+            .await
+            .change_context(errors::Error)?;
     }
 
     Ok(())

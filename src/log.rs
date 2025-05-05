@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
-use anyhow::anyhow;
+use crate::errors;
+use error_stack::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,9 +48,9 @@ impl ToString for LevelFilter {
 }
 
 impl FromStr for LevelFilter {
-    type Err = anyhow::Error;
+    type Err = errors::ErrorReport;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> core::result::Result<Self, Self::Err> {
         match s {
             "off" => Ok(Self::Off),
             "error" => Ok(Self::Error),
@@ -57,9 +58,9 @@ impl FromStr for LevelFilter {
             "info" => Ok(Self::Info),
             "trace" => Ok(Self::Trace),
             "debug" => Ok(Self::Debug),
-            _ => Err(anyhow!(
-                "invalid format: allowed values: [off, error, warn, info, debug, trace]"
-            )),
+            _ => Err(errors::Error).attach_printable(
+                "invalid format: allowed values: [off, error, warn, info, debug, trace]",
+            ),
         }
     }
 }

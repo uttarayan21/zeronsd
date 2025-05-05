@@ -1,6 +1,8 @@
 /// various IP calculation systems and some encode/decode functions
 use std::net::{IpAddr, Ipv6Addr};
 
+use crate::errors;
+use error_stack::*;
 use hex::FromHexError;
 use ipnetwork::IpNetwork;
 use zerotier_api::central_api::types::{Member, Network};
@@ -11,21 +13,23 @@ fn digest_hex(code: String) -> Result<u64, FromHexError> {
         .fold(0, |acc, x| acc << 8 | x as u64))
 }
 
-fn get_parts(member: Member) -> Result<(u64, u64), anyhow::Error> {
+fn get_parts(member: Member) -> Result<(u64, u64), errors::Error> {
     Ok((
-        digest_hex(member.network_id.clone().unwrap_or(String::new()))?,
-        digest_hex(member.node_id.unwrap_or(String::new()))?,
+        digest_hex(member.network_id.clone().unwrap_or(String::new()))
+            .change_context(errors::Error)?,
+        digest_hex(member.node_id.unwrap_or(String::new())).change_context(errors::Error)?,
     ))
 }
 
 pub trait Calculator {
-    fn sixplane(self) -> Result<IpNetwork, anyhow::Error>;
-    fn rfc4193(self) -> Result<IpNetwork, anyhow::Error>;
+    fn sixplane(self) -> Result<IpNetwork, errors::Error>;
+    fn rfc4193(self) -> Result<IpNetwork, errors::Error>;
 }
 
 impl Calculator for Network {
-    fn sixplane(self) -> Result<IpNetwork, anyhow::Error> {
-        let mut net_parts = digest_hex(self.id.unwrap_or(String::new()))?;
+    fn sixplane(self) -> Result<IpNetwork, errors::Error> {
+        let mut net_parts =
+            digest_hex(self.id.unwrap_or(String::new())).change_context(errors::Error)?;
 
         net_parts ^= net_parts >> 32;
 
@@ -41,11 +45,13 @@ impl Calculator for Network {
                 1,
             )),
             40,
-        )?)
+        )
+        .change_context(errors::Error)?)
     }
 
-    fn rfc4193(self) -> Result<IpNetwork, anyhow::Error> {
-        let net_parts = digest_hex(self.id.unwrap_or(String::new()))?;
+    fn rfc4193(self) -> Result<IpNetwork, errors::Error> {
+        let net_parts =
+            digest_hex(self.id.unwrap_or(String::new())).change_context(errors::Error)?;
         Ok(IpNetwork::new(
             IpAddr::V6(Ipv6Addr::new(
                 0xfd00 | (net_parts >> 56 & 0xff) as u16,
@@ -58,13 +64,14 @@ impl Calculator for Network {
                 0,
             )),
             88,
-        )?)
+        )
+        .change_context(errors::Error)?)
     }
 }
 
 impl Calculator for Member {
-    fn sixplane(self) -> Result<IpNetwork, anyhow::Error> {
-        let (mut net_parts, node_parts) = get_parts(self)?;
+    fn sixplane(self) -> Result<IpNetwork, errors::Error> {
+        let (mut net_parts, node_parts) = get_parts(self).change_context(errors::Error)?;
 
         net_parts ^= net_parts >> 32;
 
@@ -80,11 +87,12 @@ impl Calculator for Member {
                 1,
             )),
             80,
-        )?)
+        )
+        .change_context(errors::Error)?)
     }
 
-    fn rfc4193(self) -> Result<IpNetwork, anyhow::Error> {
-        let (net_parts, node_parts) = get_parts(self)?;
+    fn rfc4193(self) -> Result<IpNetwork, errors::Error> {
+        let (net_parts, node_parts) = get_parts(self).change_context(errors::Error)?;
 
         Ok(IpNetwork::new(
             IpAddr::V6(Ipv6Addr::new(
@@ -98,6 +106,7 @@ impl Calculator for Member {
                 (node_parts & 0xffff) as u16,
             )),
             128,
-        )?)
+        )
+        .change_context(errors::Error)?)
     }
 }

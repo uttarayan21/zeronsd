@@ -1,6 +1,7 @@
 pub mod addresses;
 pub mod authority;
 pub mod cli;
+pub mod errors;
 pub mod hosts;
 pub mod log;
 pub mod server;
