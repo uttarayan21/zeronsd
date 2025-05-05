@@ -178,7 +178,9 @@ fn local_client_from_file(
     authtoken_path: &Path,
     local_url: String,
 ) -> Result<service_api::Client, errors::Error> {
-    let authtoken = std::fs::read_to_string(authtoken_path).change_context(errors::Error)?;
+    let authtoken = std::fs::read_to_string(authtoken_path)
+        .attach_printable_lazy(|| format!("Auth Token: {}", authtoken_path.display()))
+        .change_context(errors::Error)?;
     local_client(authtoken, local_url)
 }
 
