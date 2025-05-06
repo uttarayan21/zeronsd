@@ -63,7 +63,7 @@
           {
             inherit src;
             pname = name;
-            stdenv = pkgs.clangStdenv;
+            stdenv = p: p.clangStdenv;
             doCheck = false;
             # LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
             nativeBuildInputs = with pkgs; [
